@@ -6,7 +6,8 @@
 # - Ataques de força bruta no SSH
 #
 # O script detecta automaticamente os serviços instalados e adapta
-# as configurações adequadamente.
+# as configurações adequadamente. Também detecta se o sistema usa systemd
+# e configura o backend apropriadamente.
 
 # Importa funções comuns se executado de forma independente
 if [ ! "$(type -t log)" ]; then
@@ -38,6 +39,55 @@ if [ ! "$(type -t log)" ]; then
         esac
     }
 fi
+
+# Detecta se o sistema está usando systemd
+detect_systemd() {
+    if command -v systemctl &> /dev/null && systemctl --version &> /dev/null; then
+        log "INFO" "Sistema usando systemd detectado."
+        return 0
+    else
+        log "INFO" "Sistema sem systemd detectado."
+        return 1
+    fi
+}
+
+# Detecta os arquivos de log do SSH
+detect_ssh_logs() {
+    # Array para armazenar caminhos de logs encontrados
+    local ssh_logs=()
+
+    # Verificar logs comuns do SSH
+    local common_logs=(
+        "/var/log/auth.log"
+        "/var/log/secure"
+        "/var/log/audit/audit.log"
+    )
+
+    for log_file in "${common_logs[@]}"; do
+        if [ -f "$log_file" ]; then
+            ssh_logs+=("$log_file")
+            log "INFO" "Arquivo de log SSH encontrado: $log_file"
+        fi
+    end
+
+    # Se nenhum arquivo de log tradicional for encontrado, verificar se journald tem logs do SSH
+    if [ ${#ssh_logs[@]} -eq 0 ] && command -v journalctl &> /dev/null; then
+        if journalctl _COMM=sshd -n 1 &> /dev/null; then
+            log "INFO" "Logs SSH encontrados no journald (systemd)."
+            return 0
+        else
+            log "WARN" "Nenhum log SSH encontrado no journald."
+            return 1
+        fi
+    fi
+
+    if [ ${#ssh_logs[@]} -gt 0 ]; then
+        return 0
+    else
+        log "WARN" "Nenhum arquivo de log SSH encontrado."
+        return 1
+    fi
+}
 
 # Configura o Fail2Ban
 setup_fail2ban() {
@@ -97,6 +147,38 @@ setup_fail2ban() {
     # Cria diretório para configurações personalizadas
     mkdir -p /etc/fail2ban/jail.d
 
+    # Detecta se estamos usando systemd e escolhe o backend apropriado
+    local backend="auto"
+    local ssh_backend=""
+    local uses_systemd=false
+    local ssh_logpath="%(sshd_log)s"
+
+    if detect_systemd; then
+        # Verifica se systemd tem logs do SSH
+        if journalctl _COMM=sshd -n 1 &> /dev/null; then
+            backend="systemd"
+            ssh_backend="systemd"
+            ssh_logpath=""
+            uses_systemd=true
+            log "INFO" "Usando systemd como backend para logs do SSH."
+        else
+            log "WARN" "Systemd detectado, mas não encontrou logs do SSH. Tentando detectar arquivos de log."
+            if detect_ssh_logs; then
+                log "INFO" "Usando arquivos de log tradicionais para SSH com backend auto."
+            else
+                log "WARN" "Nenhum log SSH encontrado. Tentando usar systemd mesmo assim."
+                backend="systemd"
+                ssh_backend="systemd"
+                ssh_logpath=""
+                uses_systemd=true
+            fi
+        fi
+    else
+        if ! detect_ssh_logs; then
+            log "WARN" "Nenhum log SSH encontrado. O Fail2Ban pode não funcionar corretamente."
+        fi
+    fi
+
     # Configuração principal do Fail2Ban
     cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
@@ -114,11 +196,10 @@ ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
 banaction = iptables-multiport
 banaction_allports = iptables-allports
 
-# Use systemd para monitoramento quando disponível
-backend = auto
+# Backend para logs
+backend = $backend
 
 # Ação para executar quando um IP for banido
-# action = %(action_)s
 action = %(action_mw)s
 
 # Opção para enviar emails ao administrador quando um IP for banido
@@ -130,21 +211,41 @@ mta = sendmail
 protocol = tcp
 loglevel = INFO
 logtarget = /var/log/fail2ban.log
+
+# Permitir IPv6
+allowipv6 = auto
+
+# Caso não encontre o arquivo de log, não falhe
+# Isso é importante para systemd onde os logs são virtuais
+fail_on_missing_logfile = false
 EOF
 
     # Configuração para SSH
-    cat > /etc/fail2ban/jail.d/sshd.local << EOF
+    if [ "$uses_systemd" = true ]; then
+        # Configuração específica para systemd
+        cat > /etc/fail2ban/jail.d/sshd.local << EOF
 [sshd]
 enabled = true
 port = $ssh_port
 filter = sshd
-logpath = %(sshd_log)s
-backend = %(sshd_backend)s
-# Aumentamos para 10 tentativas apenas para SSH
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=sshd.service + _COMM=sshd
 maxretry = 5
-# Aumentamos o bantime para 48 horas em caso de ataque SSH
 bantime = 172800
 EOF
+    else
+        # Configuração para logs tradicionais
+        cat > /etc/fail2ban/jail.d/sshd.local << EOF
+[sshd]
+enabled = true
+port = $ssh_port
+filter = sshd
+logpath = $ssh_logpath
+backend = $ssh_backend
+maxretry = 5
+bantime = 172800
+EOF
+    fi
 
     # Detecta e configura serviços adicionais
     detect_and_configure_services
@@ -165,11 +266,15 @@ EOF
     sleep 2
     if command -v systemctl &> /dev/null && systemctl is-active fail2ban &> /dev/null; then
         log "INFO" "Fail2Ban está rodando corretamente."
+
+        # Exibe status dos jails ativos
+        log "INFO" "Status dos jails configurados:"
+        fail2ban-client status
     elif command -v service &> /dev/null && service fail2ban status &> /dev/null; then
         log "INFO" "Fail2Ban está rodando corretamente."
     else
         log "WARN" "Não foi possível verificar se o Fail2Ban está rodando."
-        log "WARN" "Verifique o status do serviço manualmente."
+        log "WARN" "Verifique o status do serviço manualmente com: fail2ban-client status"
     fi
 
     log "INFO" "Fail2Ban configurado com sucesso!"
@@ -177,6 +282,12 @@ EOF
     log "INFO" "- Tempo de banimento: $(($ban_time/3600)) horas"
     log "INFO" "- Período de observação: $(($find_time/60)) minutos"
     log "INFO" "- Máximo de tentativas: $max_retry"
+    log "INFO" "- Backend utilizado: $backend"
+
+    # Instrua o usuário sobre como testar a configuração
+    log "INFO" "Para testar o Fail2Ban, você pode verificar o status com:"
+    log "INFO" "  sudo fail2ban-client status sshd"
+    log "INFO" "  sudo fail2ban-client status"
 
     return 0
 }
@@ -202,9 +313,9 @@ failregex = ^time=".*" level=warning msg=".*" HTTP request: remote_ip=<HOST>.*$
 ignoreregex =
 EOF
 
-    # Procura logs do Docker
+    # Escolhe o backend apropriado com base em como o Docker está enviando logs
     if [ -f "/var/log/docker.log" ]; then
-        # Cria configuração para Docker
+        # Cria configuração para Docker com arquivos de log tradicionais
         cat > /etc/fail2ban/jail.d/docker.local << EOF
 [docker-auth]
 enabled = true
@@ -214,10 +325,10 @@ logpath = /var/log/docker.log
 bantime = 86400
 maxretry = 5
 EOF
-        log "INFO" "Proteção para Docker configurada com sucesso!"
+        log "INFO" "Proteção para Docker configurada com sucesso (logs tradicionais)!"
     else
         # Configuração alternativa usando journald
-        if command -v journalctl &> /dev/null; then
+        if command -v journalctl &> /dev/null && journalctl -u docker.service -n 1 &> /dev/null; then
             cat > /etc/fail2ban/jail.d/docker-journald.local << EOF
 [docker-auth]
 enabled = true
@@ -235,6 +346,7 @@ EOF
         fi
     fi
 }
+
 
 # Executa a função se o script for executado diretamente
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

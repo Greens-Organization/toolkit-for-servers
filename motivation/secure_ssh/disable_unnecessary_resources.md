@@ -17,7 +17,6 @@ AllowAgentForwarding no
 AllowTcpForwarding no
 PrintMotd no
 AcceptEnv LANG LC_*
-Subsystem sftp internal-sftp
 ```
 
 Outras configurações de segurança relacionadas:

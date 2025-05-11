@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Toolkit for Servers - Módulo de Segurança SSH
+# Toolkit for Servers - Módulo de Segurança SSH (CORRIGIDO)
 #
 # Este módulo implementa práticas de segurança recomendadas para SSH em 2025:
 # - Autenticação por chave SSH (opcional)
@@ -103,6 +103,13 @@ secure_ssh() {
         fi
     fi
 
+    # Verifica se o subsistema SFTP já está definido no arquivo principal
+    local has_sftp_subsystem=false
+    if grep -q "^Subsystem.*sftp" "$ssh_config"; then
+        has_sftp_subsystem=true
+        log "INFO" "Subsistema SFTP já configurado no arquivo principal. Ajustando configuração..."
+    fi
+
     # Cria configuração SSH segura
     local secure_ssh_config="${ssh_config_dir}/00-security.conf"
     log "INFO" "Criando configuração SSH segura em $secure_ssh_config"
@@ -151,19 +158,33 @@ AllowAgentForwarding no
 AllowTcpForwarding no
 PrintMotd no
 AcceptEnv LANG LC_*
-Subsystem sftp internal-sftp
-
-# Registro detalhado
-LogLevel VERBOSE
 EOF
+
+    # Adiciona a configuração do subsistema SFTP apenas se não estiver no arquivo principal
+    if [ "$has_sftp_subsystem" = false ]; then
+        echo "Subsystem sftp internal-sftp" >> "$secure_ssh_config"
+    fi
+
+    echo "# Registro detalhado
+LogLevel VERBOSE" >> "$secure_ssh_config"
 
     # Permissões corretas para arquivos de configuração
     chmod 600 "$secure_ssh_config"
+
+    # Comenta o subsistema SFTP no arquivo principal se estiver presente e também em nossa configuração
+    if [ "$has_sftp_subsystem" = true ]; then
+        log "INFO" "Comentando a linha de subsistema SFTP no arquivo principal para evitar duplicação"
+        sed -i.bak '/^Subsystem.*sftp/s/^/#/' "$ssh_config"
+    fi
 
     # Testa se a configuração está correta
     if command -v sshd &> /dev/null; then
         if ! sshd -t; then
             log "ERROR" "Configuração SSH inválida. Restaurando backup..."
+            # Restaura o arquivo principal se foi modificado
+            if [ -f "${ssh_config}.bak" ]; then
+                mv "${ssh_config}.bak" "$ssh_config"
+            fi
             cp -a "$backup_dir/sshd_config" "$ssh_config"
             rm -f "$secure_ssh_config"
             return 1
@@ -226,10 +247,10 @@ configure_ssh_authorized_keys() {
     log "INFO" "Configurando chaves SSH autorizadas..."
 
     # Determina o usuário corrente (não-root) para adicionar as chaves
-    local current_user=$(logname 2>/dev/null || echo "$SUDO_USER" || id -un)
+    local current_user=$(logname 2>/dev/null || echo "${SUDO_USER:-}" || id -un)
 
     # Se o usuário atual for root e SUDO_USER não estiver definido, pergunte pelo usuário
-    if [ "$current_user" = "root" ] && [ -z "$SUDO_USER" ]; then
+    if [ "$current_user" = "root" ] && [ -z "${SUDO_USER:-}" ]; then
         # Lista usuários não-root com /home
         local available_users=$(grep "/home" /etc/passwd | cut -d: -f1 | grep -v "^root$")
 

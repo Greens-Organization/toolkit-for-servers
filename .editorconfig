@@ -1,0 +1,66 @@
+# EditorConfig for Toolkit for Servers
+# http://editorconfig.org
+
+# top-most EditorConfig file
+root = true
+
+# Defaults for all files
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# Shell scripts
+[*.{sh,bash}]
+indent_style = tab
+indent_size = 4
+shell_variant = bash
+binary_next_line = true  # like -bn
+switch_case_indent = true  # like -ci
+space_redirects = true  # like -sr
+keep_padding = false  # like -kp
+
+# Specific shell script configuration for tests
+[{test-suite.sh,tests/*.bats}]
+indent_style = tab
+indent_size = 4
+shell_variant = bats
+
+# Module files
+[modules/*.sh]
+indent_style = tab
+indent_size = 4
+
+# Main install script
+[install.sh]
+indent_style = tab
+indent_size = 4
+
+# Documentation
+[*.md]
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = false
+
+# YAML files
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# JSON files
+[*.json]
+indent_style = space
+indent_size = 2
+
+# Docker files
+[{Dockerfile,*.Dockerfile}]
+indent_style = space
+indent_size = 2
+
+# Git files
+[.git*]
+indent_style = tab
+indent_size = 4

@@ -24,7 +24,7 @@ Este toolkit é especialmente útil para:
 
 ## 🚀 Instalação Rápida
 
-### Instalação Básica (Remota)
+### Instalação (Remota)
 
 ```bash
 curl -fsSL https://grngroup.net/install.sh | sudo bash
